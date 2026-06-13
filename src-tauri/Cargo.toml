@@ -1,6 +1,6 @@
 [package]
 name = "im-not-finder"
-version = "1.0.0"
+version = "1.0.1"
 description = "Unified SSH/ADB workbench"
 authors = ["dongkim"]
 edition = "2021"

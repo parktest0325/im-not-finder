@@ -11,7 +11,11 @@ use tauri::Emitter;
 use tokio::process::Command;
 
 fn adb() -> Command {
-    Command::new("adb")
+    let mut cmd = Command::new("adb");
+    // On Windows, stop a console window from flashing on every adb invocation.
+    #[cfg(windows)]
+    cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    cmd
 }
 
 #[derive(Serialize, Clone, Debug)]

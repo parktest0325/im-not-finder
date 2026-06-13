@@ -1,6 +1,6 @@
 {
   "name": "im-not-finder",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Unified SSH/ADB workbench with a TUI look and GUI behaviour",
   "type": "module",
   "scripts": {
