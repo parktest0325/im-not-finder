@@ -6,10 +6,12 @@
     axis = "x",
     style = "",
     ondelta,
+    onstart,
   }: {
     axis?: "x" | "y";
     style?: string;
     ondelta: (delta: number) => void;
+    onstart?: () => void;
   } = $props();
 
   let dragging = $state(false);
@@ -18,6 +20,7 @@
   function onpointerdown(e: PointerEvent) {
     dragging = true;
     last = axis === "x" ? e.clientX : e.clientY;
+    onstart?.();
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
     e.preventDefault();
   }

@@ -43,6 +43,9 @@
   .mode.adb {
     background: var(--accent-2);
   }
+  .mode.local {
+    background: var(--warn);
+  }
   .msg {
     color: var(--fg-dim);
     overflow: hidden;

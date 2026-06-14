@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from "svelte";
   import type { Session } from "./lib/api";
   import { macroState, recorder, comboFromEvent } from "./lib/macros.svelte";
   import ConnectionBar from "./components/ConnectionBar.svelte";
@@ -28,6 +29,46 @@
   // resizable layout
   let leftWidth = $state(320);
   let termHeight = $state(220);
+
+  // workspace size (layout px, unaffected by zoom) → dynamic resize limits
+  let workspaceEl: HTMLDivElement;
+  let workspaceW = $state(1200);
+  let workspaceH = $state(600);
+  const MIN_LEFT = 180;
+  const MIN_TERM = 80;
+  const MIN_MAIN = 200; // keep the viewer usable
+  const MIN_TOP = 22; // keep only the FILES/VIEWER header bars visible
+  const SPLIT = 6;
+  let maxLeft = $derived(Math.max(MIN_LEFT, workspaceW - SPLIT - MIN_MAIN));
+  let maxTerm = $derived(Math.max(MIN_TERM, workspaceH - SPLIT - MIN_TOP));
+  const clampLeft = (v: number) => Math.max(MIN_LEFT, Math.min(maxLeft, v));
+  const clampTerm = (v: number) => Math.max(MIN_TERM, Math.min(maxTerm, v));
+
+  // unclamped accumulators so an over-drag must be "paid back" before the size
+  // moves again (the divider tracks the mouse, not a clamped residue)
+  let rawLeftWidth = leftWidth;
+  let rawTermHeight = termHeight;
+
+  $effect(() => {
+    if (!workspaceEl) return;
+    const ro = new ResizeObserver((entries) => {
+      const r = entries[0].contentRect;
+      workspaceW = r.width;
+      workspaceH = r.height;
+    });
+    ro.observe(workspaceEl);
+    return () => ro.disconnect();
+  });
+
+  // re-clamp when the window (and thus the limits) shrink
+  $effect(() => {
+    const ml = maxLeft;
+    const mt = maxTerm;
+    untrack(() => {
+      leftWidth = Math.max(MIN_LEFT, Math.min(ml, leftWidth));
+      termHeight = Math.max(MIN_TERM, Math.min(mt, termHeight));
+    });
+  });
 
   // app-wide zoom (Ctrl + / Ctrl - / Ctrl 0)
   let zoom = $state(1);
@@ -104,6 +145,7 @@
 
   <div
     class="workspace"
+    bind:this={workspaceEl}
     style="grid-template-columns: {leftWidth}px 6px 1fr; grid-template-rows: 1fr 6px {termHeight}px;"
   >
     <div class="tree-cell">
@@ -118,7 +160,11 @@
     <Splitter
       axis="x"
       style="grid-column: 2; grid-row: 1;"
-      ondelta={(dx) => (leftWidth = Math.max(180, Math.min(640, leftWidth + dx)))}
+      onstart={() => (rawLeftWidth = leftWidth)}
+      ondelta={(dx) => {
+        rawLeftWidth += dx / zoom;
+        leftWidth = clampLeft(rawLeftWidth);
+      }}
     />
 
     <div class="main-cell">
@@ -128,12 +174,20 @@
     <Splitter
       axis="y"
       style="grid-column: 1 / span 3; grid-row: 2;"
-      ondelta={(dy) =>
-        (termHeight = Math.max(80, Math.min(560, termHeight - dy)))}
+      onstart={() => (rawTermHeight = termHeight)}
+      ondelta={(dy) => {
+        rawTermHeight -= dy / zoom;
+        termHeight = clampTerm(rawTermHeight);
+      }}
     />
 
     <div class="term-cell">
-      <TerminalPanel bind:this={terminalPanel} session={activeSession} {sessions} />
+      <TerminalPanel
+        bind:this={terminalPanel}
+        session={activeSession}
+        {sessions}
+        {zoom}
+      />
     </div>
   </div>
 

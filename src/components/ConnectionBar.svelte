@@ -102,6 +102,9 @@
   .badge.adb {
     background: var(--accent-2);
   }
+  .badge.local {
+    background: var(--warn);
+  }
   .x {
     border: none;
     background: transparent;

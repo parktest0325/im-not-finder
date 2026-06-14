@@ -396,13 +396,15 @@
     <span>files</span>
     {#if elevated}<span class="rootbadge">root</span>{/if}
     <span class="spacer"></span>
-    <button
-      class="su"
-      class:on={elevated}
-      title="elevate (su / sudo) for file operations"
-      onclick={toggleSu}
-      disabled={!session}>su</button
-    >
+    {#if session?.kind !== "local"}
+      <button
+        class="su"
+        class:on={elevated}
+        title="elevate (su / sudo) for file operations"
+        onclick={toggleSu}
+        disabled={!session}>su</button
+      >
+    {/if}
     <button
       class="mini"
       title="cd terminal to this path"

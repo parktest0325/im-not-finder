@@ -1,13 +1,10 @@
 //! ADB transport: delegates to the system `adb` binary.
 
 use super::*;
-use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+use portable_pty::CommandBuilder;
 use serde::Serialize;
-use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex as StdMutex};
-use tauri::Emitter;
 use tokio::process::Command;
 
 fn adb() -> Command {
@@ -306,100 +303,11 @@ impl Transport for AdbTransport {
         cols: u16,
         rows: u16,
     ) -> Result<ShellHandle> {
-        // Run `adb shell` inside a *real* PTY (ConPTY on Windows). Without a tty,
-        // adb fully-buffers its stdout and doesn't allocate a device PTY, which
-        // makes input lag a keystroke behind and needs double-Enter. A real PTY
-        // fixes both.
-        let serial = self.serial.clone();
-        let size = PtySize {
-            rows,
-            cols,
-            pixel_width: 0,
-            pixel_height: 0,
-        };
-
-        let (killer, reader, writer, master) = tokio::task::spawn_blocking(
-            move || -> Result<_> {
-                let pty = native_pty_system();
-                let pair = pty.openpty(size)?;
-                let mut cmd = CommandBuilder::new("adb");
-                cmd.args(["-s", serial.as_str(), "shell"]);
-                let child = pair.slave.spawn_command(cmd)?;
-                drop(pair.slave); // close our handle to the slave end
-                let killer = child.clone_killer();
-                // reap the child so it doesn't linger as a zombie
-                std::thread::spawn(move || {
-                    let mut child = child;
-                    let _ = child.wait();
-                });
-                let reader = pair.master.try_clone_reader()?;
-                let writer = pair.master.take_writer()?;
-                Ok((killer, reader, writer, pair.master))
-            },
-        )
-        .await
-        .map_err(|e| anyhow::anyhow!(e.to_string()))??;
-
-        // reader thread: pump PTY output to the frontend
-        let ev = format!("term://{shell_id}");
-        let app_out = app.clone();
-        std::thread::spawn(move || {
-            let mut reader = reader;
-            let mut buf = [0u8; 8192];
-            loop {
-                match reader.read(&mut buf) {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => {
-                        let _ = app_out.emit(&ev, buf[..n].to_vec());
-                    }
-                }
-            }
-        });
-
-        let writer = Arc::new(StdMutex::new(writer));
-        let master = Arc::new(StdMutex::new(master));
-        let killer = Arc::new(StdMutex::new(killer));
-        let (in_tx, mut in_rx) = mpsc::unbounded_channel::<Vec<u8>>();
-        let (rs_tx, mut rs_rx) = mpsc::unbounded_channel::<(u16, u16)>();
-        let (kill_tx, mut kill_rx) = mpsc::unbounded_channel::<()>();
-
-        tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    Some(data) = in_rx.recv() => {
-                        let w = writer.clone();
-                        let _ = tokio::task::spawn_blocking(move || {
-                            if let Ok(mut g) = w.lock() {
-                                let _ = g.write_all(&data);
-                                let _ = g.flush();
-                            }
-                        }).await;
-                    }
-                    Some((c, r)) = rs_rx.recv() => {
-                        let m = master.clone();
-                        let _ = tokio::task::spawn_blocking(move || {
-                            if let Ok(g) = m.lock() {
-                                let _ = g.resize(PtySize { rows: r, cols: c, pixel_width: 0, pixel_height: 0 });
-                            }
-                        }).await;
-                    }
-                    _ = kill_rx.recv() => {
-                        if let Ok(mut k) = killer.lock() {
-                            let _ = k.kill();
-                        }
-                        break;
-                    }
-                }
-            }
-        });
-
-        Ok(ShellHandle {
-            input: in_tx,
-            resize: rs_tx,
-            close: Box::new(move || {
-                let _ = kill_tx.send(());
-            }),
-        })
+        // `adb shell` inside a real PTY (ConPTY on Windows) — without a tty adb
+        // buffers output and skips device-PTY allocation (laggy / double-Enter).
+        let mut cmd = CommandBuilder::new("adb");
+        cmd.args(["-s", self.serial.as_str(), "shell"]);
+        super::spawn_pty(app, shell_id, cols, rows, cmd).await
     }
 
     async fn elevate(&self, _password: Option<String>) -> Result<ElevateStatus> {

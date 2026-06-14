@@ -1,7 +1,7 @@
 // Thin typed wrappers over the Tauri command layer (src-tauri/src/commands.rs).
 import { invoke } from "@tauri-apps/api/core";
 
-export type SessionKind = "ssh" | "adb";
+export type SessionKind = "ssh" | "adb" | "local";
 
 export interface Session {
   id: string;
@@ -59,6 +59,7 @@ export const connectAdb = (serial: string) =>
   invoke<Session>("connect_adb", { serial });
 export const connectSsh = (opts: SshConnectOpts) =>
   invoke<Session>("connect_ssh", { opts });
+export const connectLocal = () => invoke<Session>("connect_local");
 export const disconnect = (sessionId: string) =>
   invoke<void>("disconnect_session", { sessionId });
 

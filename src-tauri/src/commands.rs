@@ -2,6 +2,7 @@
 
 use crate::session::AppState;
 use crate::transport::adb::{self, AdbTransport};
+use crate::transport::local::LocalTransport;
 use crate::transport::ssh::{SshConnectOpts, SshTransport};
 use crate::transport::{DirEntry, ElevateStatus, ExecResult, Transport};
 use serde::{Deserialize, Serialize};
@@ -104,6 +105,15 @@ pub fn list_ssh_history(app: AppHandle) -> R<Vec<crate::config::SshHistoryEntry>
 pub fn delete_ssh_history(app: AppHandle, id: String) -> R<()> {
     crate::config::delete(&app, &id);
     Ok(())
+}
+
+#[tauri::command]
+pub async fn connect_local(state: State<'_, AppState>) -> R<SessionInfo> {
+    let t = LocalTransport::connect().map_err(e)?;
+    let t: Arc<dyn Transport> = Arc::new(t);
+    let id = state.next_id("local");
+    state.add_session(id.clone(), t.clone()).await;
+    Ok(info(id, "local", &t))
 }
 
 #[tauri::command]

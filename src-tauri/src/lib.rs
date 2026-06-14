@@ -16,6 +16,7 @@ pub fn run() {
             commands::list_adb_devices,
             commands::connect_adb,
             commands::connect_ssh,
+            commands::connect_local,
             commands::list_ssh_history,
             commands::delete_ssh_history,
             commands::disconnect_session,

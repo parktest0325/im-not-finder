@@ -14,11 +14,14 @@
   let {
     session,
     active,
+    zoom = 1,
   }: {
     session: Session;
     active: boolean;
+    zoom?: number;
   } = $props();
 
+  const BASE_FONT = 13;
   let host: HTMLDivElement;
   let term: XTerm | undefined;
   let fit: FitAddon | undefined;
@@ -38,7 +41,7 @@
       term = new XTerm({
         fontFamily:
           '"Cascadia Mono","JetBrains Mono","Consolas",ui-monospace,monospace',
-        fontSize: 13,
+        fontSize: BASE_FONT,
         theme,
         cursorBlink: true,
         scrollback: 5000,
@@ -70,11 +73,59 @@
     }
   });
 
+  // The terminal scales with the app via the document's CSS zoom. Browser zoom
+  // doesn't fire ResizeObserver (layout size is unchanged), so refit explicitly
+  // whenever the zoom changes.
+  $effect(() => {
+    void zoom;
+    if (term) {
+      requestAnimationFrame(() => {
+        safeFit();
+        if (shellId && term) void shellResize(shellId, term.cols, term.rows);
+      });
+    }
+  });
+
+  // Derive the *actual rendered* cell size from xterm's own screen element
+  // (its size ÷ its current cols/rows), then fit the host to it. Everything is
+  // read via getBoundingClientRect in the same instant, so the CSS-zoom factor
+  // cancels and the grid matches the visible viewport exactly (no overflow).
   function safeFit() {
+    if (!term || !host) return;
     try {
-      fit?.fit();
+      const rect = host.getBoundingClientRect();
+      const screen = host.querySelector(
+        ".xterm-screen",
+      ) as HTMLElement | null;
+      if (
+        !screen ||
+        term.cols < 1 ||
+        term.rows < 1 ||
+        rect.width < 8 ||
+        rect.height < 8
+      ) {
+        fit?.fit();
+        return;
+      }
+      const sRect = screen.getBoundingClientRect();
+      const cellW = sRect.width / term.cols;
+      const cellH = sRect.height / term.rows;
+      if (cellW <= 0 || cellH <= 0) {
+        fit?.fit();
+        return;
+      }
+      // host padding (4px x / 2px y) is in layout px, but rect/cell are zoomed,
+      // so scale it; a touch extra guarantees the grid never overflows the host.
+      const z = zoom || 1;
+      const cols = Math.max(2, Math.floor((rect.width - 10 * z) / cellW));
+      const rows = Math.max(1, Math.floor((rect.height - 6 * z) / cellH));
+      if (cols !== term.cols || rows !== term.rows) term.resize(cols, rows);
     } catch {
-      /* element not measurable yet */
+      try {
+        fit?.fit();
+      } catch {
+        /* ignore */
+      }
     }
   }
 

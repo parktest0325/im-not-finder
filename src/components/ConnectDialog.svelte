@@ -3,6 +3,7 @@
     listAdbDevices,
     connectAdb,
     connectSsh,
+    connectLocal,
     listSshHistory,
     deleteSshHistory,
     type Session,
@@ -19,9 +20,24 @@
     onCancel: () => void;
   } = $props();
 
-  let tab = $state<"adb" | "ssh">("adb");
+  let tab = $state<"adb" | "ssh" | "local">("adb");
   let busy = $state(false);
   let error = $state("");
+
+  const localShell = navigator.userAgent.includes("Win")
+    ? "PowerShell"
+    : "your default shell";
+
+  async function connectLocalNow() {
+    error = "";
+    busy = true;
+    try {
+      onConnected(await connectLocal());
+    } catch (e) {
+      error = String(e);
+      busy = false;
+    }
+  }
 
   // saved SSH connections (no secrets)
   let history = $state<SshHistoryEntry[]>([]);
@@ -62,6 +78,9 @@
     } else if (e.key === "Enter" && tab === "ssh" && !busy && host && username) {
       e.preventDefault();
       void connectSshNow();
+    } else if (e.key === "Enter" && tab === "local" && !busy) {
+      e.preventDefault();
+      void connectLocalNow();
     }
   }
 
@@ -138,6 +157,7 @@
   <div class="tabs">
     <button class:on={tab === "adb"} onclick={() => (tab = "adb")}>ADB</button>
     <button class:on={tab === "ssh"} onclick={() => (tab = "ssh")}>SSH</button>
+    <button class:on={tab === "local"} onclick={() => (tab = "local")}>LOCAL</button>
   </div>
 
   <div class="panel-body body">
@@ -168,7 +188,7 @@
           <span class="state {d.state}">{d.state}</span>
         </div>
       {/each}
-    {:else}
+    {:else if tab === "ssh"}
       {#if history.length > 0}
         <div class="histdd">
           <button
@@ -245,6 +265,18 @@
         <div class="actions">
           <button class="primary" onclick={connectSshNow} disabled={busy || !host || !username}
             >connect</button
+          >
+        </div>
+      </div>
+    {:else}
+      <div class="local">
+        <p class="dim">
+          Open a terminal on this machine ({localShell}) and browse the local
+          filesystem.
+        </p>
+        <div class="actions">
+          <button class="primary" onclick={connectLocalNow} disabled={busy}
+            >open local session</button
           >
         </div>
       </div>
@@ -443,6 +475,14 @@
     color: var(--bg);
     border-color: var(--accent);
     font-weight: 600;
+  }
+  .local p {
+    margin: 0 0 14px;
+    line-height: 1.5;
+  }
+  .local .actions {
+    display: flex;
+    justify-content: flex-end;
   }
   .error {
     margin-top: 10px;

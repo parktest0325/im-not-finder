@@ -1,11 +1,16 @@
-//! Protocol-agnostic transport abstraction shared by the SSH and ADB backends.
+//! Protocol-agnostic transport abstraction shared by the SSH, ADB and local backends.
 
 pub mod adb;
+pub mod local;
 pub mod ssh;
 
 use async_trait::async_trait;
+use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use serde::Serialize;
+use std::io::{Read, Write};
 use std::path::Path;
+use std::sync::{Arc, Mutex as StdMutex};
+use tauri::Emitter;
 use tokio::sync::mpsc;
 
 pub type Result<T> = anyhow::Result<T>;
@@ -87,6 +92,101 @@ pub trait Transport: Send + Sync {
 /// Single-quote a string for a POSIX shell (`/system/bin/sh`, bash, ...).
 pub fn shq(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// Spawn `cmd` inside a real PTY (ConPTY on Windows) and stream its output via
+/// `term://<shell_id>` events. Shared by the ADB and local-shell transports.
+pub async fn spawn_pty(
+    app: tauri::AppHandle,
+    shell_id: String,
+    cols: u16,
+    rows: u16,
+    cmd: CommandBuilder,
+) -> Result<ShellHandle> {
+    let size = PtySize {
+        rows,
+        cols,
+        pixel_width: 0,
+        pixel_height: 0,
+    };
+
+    let (killer, reader, writer, master) =
+        tokio::task::spawn_blocking(move || -> Result<_> {
+            let pty = native_pty_system();
+            let pair = pty.openpty(size)?;
+            let child = pair.slave.spawn_command(cmd)?;
+            drop(pair.slave);
+            let killer = child.clone_killer();
+            std::thread::spawn(move || {
+                let mut child = child;
+                let _ = child.wait();
+            });
+            let reader = pair.master.try_clone_reader()?;
+            let writer = pair.master.take_writer()?;
+            Ok((killer, reader, writer, pair.master))
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!(e.to_string()))??;
+
+    let ev = format!("term://{shell_id}");
+    let app_out = app.clone();
+    std::thread::spawn(move || {
+        let mut reader = reader;
+        let mut buf = [0u8; 8192];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    let _ = app_out.emit(&ev, buf[..n].to_vec());
+                }
+            }
+        }
+    });
+
+    let writer = Arc::new(StdMutex::new(writer));
+    let master = Arc::new(StdMutex::new(master));
+    let killer = Arc::new(StdMutex::new(killer));
+    let (in_tx, mut in_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    let (rs_tx, mut rs_rx) = mpsc::unbounded_channel::<(u16, u16)>();
+    let (kill_tx, mut kill_rx) = mpsc::unbounded_channel::<()>();
+
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                Some(data) = in_rx.recv() => {
+                    let w = writer.clone();
+                    let _ = tokio::task::spawn_blocking(move || {
+                        if let Ok(mut g) = w.lock() {
+                            let _ = g.write_all(&data);
+                            let _ = g.flush();
+                        }
+                    }).await;
+                }
+                Some((c, r)) = rs_rx.recv() => {
+                    let m = master.clone();
+                    let _ = tokio::task::spawn_blocking(move || {
+                        if let Ok(g) = m.lock() {
+                            let _ = g.resize(PtySize { rows: r, cols: c, pixel_width: 0, pixel_height: 0 });
+                        }
+                    }).await;
+                }
+                _ = kill_rx.recv() => {
+                    if let Ok(mut k) = killer.lock() {
+                        let _ = k.kill();
+                    }
+                    break;
+                }
+            }
+        }
+    });
+
+    Ok(ShellHandle {
+        input: in_tx,
+        resize: rs_tx,
+        close: Box::new(move || {
+            let _ = kill_tx.send(());
+        }),
+    })
 }
 
 fn is_hhmm(t: &str) -> bool {

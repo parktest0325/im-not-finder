@@ -7,9 +7,11 @@
   let {
     session,
     sessions,
+    zoom = 1,
   }: {
     session: Session | null; // active session
     sessions: Session[]; // all live sessions (for cleanup)
+    zoom?: number; // app zoom; terminals counter-zoom and scale font instead
   } = $props();
 
   interface Tab {
@@ -198,6 +200,7 @@
           bind:this={instances[t.id]}
           session={t.session}
           active={t.id === activeTabId}
+          {zoom}
         />
       {/each}
     </div>
@@ -266,6 +269,9 @@
   }
   .dot.adb {
     background: var(--accent-2);
+  }
+  .dot.local {
+    background: var(--warn);
   }
   .tname {
     overflow: hidden;
