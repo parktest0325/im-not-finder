@@ -118,6 +118,16 @@ export const stageForDrag = (sessionId: string, path: string) =>
 /** Path to a small PNG used as the native drag-preview image. */
 export const dragIcon = () => invoke<string>("drag_icon");
 
+export interface DragItemInput {
+  path: string;
+  name: string;
+  isDir: boolean;
+  size: number;
+}
+/** Windows delayed-rendering drag: files are downloaded only at drop time. */
+export const startPromisedDrag = (sessionId: string, items: DragItemInput[]) =>
+  invoke<void>("start_promised_drag", { sessionId, items });
+
 /** Upload a local file/dir into a remote directory (drag-in). */
 export const upload = (
   sessionId: string,

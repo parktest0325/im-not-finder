@@ -2,7 +2,7 @@
   import {
     listDir,
     stageForDrag,
-    dragIcon,
+    startPromisedDrag,
     upload,
     elevate,
     unelevate,
@@ -355,41 +355,86 @@
     void load(); // refresh once after an external drop
   }
 
-  // ---------- drag-out ----------
-  let iconPath: string | null = null;
-  async function ensureIcon(): Promise<string> {
-    if (iconPath === null) {
-      try {
-        iconPath = await dragIcon();
-      } catch {
-        iconPath = "";
-      }
+  // ---------- drag-out (pointer-based) ----------
+  // WebView2 doesn't reliably fire HTML5 `dragstart` on focused/selected rows,
+  // so we detect the drag gesture ourselves: press a row, move past a threshold,
+  // then kick off the native OS drag.
+  let pressEntry: DirEntry | null = null;
+  let pressX = 0;
+  let pressY = 0;
+  let dragStarted = false;
+
+  function onRowPointerDown(e: PointerEvent, entry: DirEntry) {
+    if (e.button !== 0) return; // left button only
+    pressEntry = entry;
+    pressX = e.clientX;
+    pressY = e.clientY;
+    dragStarted = false;
+  }
+  function onWindowPointerMove(e: PointerEvent) {
+    if (!pressEntry || dragStarted) return;
+    if (Math.hypot(e.clientX - pressX, e.clientY - pressY) > 6) {
+      dragStarted = true;
+      const entry = pressEntry;
+      pressEntry = null;
+      void beginDrag(entry);
     }
-    return iconPath;
+  }
+  function onWindowPointerUp() {
+    pressEntry = null;
+    dragStarted = false;
   }
 
-  async function onDragStart(e: DragEvent, entry: DirEntry) {
-    e.preventDefault();
+  async function beginDrag(entry: DirEntry) {
     if (!session) return;
-    // drag the whole selection if the grabbed row is part of it
-    const targets =
-      selected.has(entry.path) && selected.size > 1
-        ? entries.filter((en) => selected.has(en.path))
-        : [entry];
-    onStatus(`staging ${targets.length} item(s)…`);
+    // drag is based on the current selection; if the grabbed row isn't part of
+    // it, make it the selection first, then drag everything selected.
+    if (!selected.has(entry.path)) {
+      selected = new Set([entry.path]);
+      anchorIdx = entries.findIndex((en) => en.path === entry.path);
+    }
+    const targets = entries.filter((en) => selected.has(en.path));
+    if (targets.length === 0) return;
+
+    // Windows: delayed rendering — hand the OS a promised-files object; bytes
+    // are downloaded only when dropped. No pre-staging, no handle leak.
+    if (navigator.userAgent.includes("Win")) {
+      onStatus(`drag ${targets.length} item(s) — drop to copy`);
+      try {
+        await startPromisedDrag(
+          session.id,
+          targets.map((t) => ({
+            path: t.path,
+            name: t.name,
+            isDir: t.kind === "dir",
+            size: t.size,
+          })),
+        );
+      } catch (err) {
+        onStatus(`drag failed: ${err}`);
+      }
+      return;
+    }
+
+    // other platforms: stage to temp, then native drag
+    onStatus(`staging ${targets.length} item(s)… (keep holding)`);
     try {
-      const icon = await ensureIcon();
-      const locals: string[] = [];
-      for (const t of targets) locals.push(await stageForDrag(session.id, t.path));
+      const locals = await Promise.all(
+        targets.map((t) => stageForDrag(session.id, t.path)),
+      );
       onStatus(`drag ${targets.length} item(s) — drop onto a folder`);
-      await startDrag({ item: locals, icon, mode: "copy" });
+      await startDrag({ item: locals, icon: "", mode: "copy" });
     } catch (err) {
       onStatus(`drag failed: ${err}`);
     }
   }
 </script>
 
-<svelte:window onclick={() => menu && closeMenu()} />
+<svelte:window
+  onclick={() => menu && closeMenu()}
+  onpointermove={onWindowPointerMove}
+  onpointerup={onWindowPointerUp}
+/>
 
 <div class="panel" class:drop={dropActive} bind:this={panelEl}>
   <div class="panel-title">
@@ -485,11 +530,10 @@
           class:selected={selected.has(entry.path)}
           class:cut={clipboard?.mode === "cut" &&
             clipboard.paths.includes(entry.path)}
-          draggable={renaming !== entry.path}
+          onpointerdown={(e) => onRowPointerDown(e, entry)}
           onclick={(e) => onRowClick(e, entry, i)}
           ondblclick={() => onRowActivate(entry)}
           oncontextmenu={(e) => openMenu(e, entry, i)}
-          ondragstart={(e) => onDragStart(e, entry)}
           role="button"
           tabindex="0"
           onkeydown={(e) => e.key === "Enter" && onRowActivate(entry)}

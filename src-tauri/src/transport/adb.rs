@@ -190,6 +190,21 @@ impl Transport for AdbTransport {
             .await
     }
 
+    async fn walk_files(&self, root: &str) -> Result<Vec<(String, u64)>> {
+        let cmd = self.wrap(&format!("find {} -type f", shq(root)));
+        let out = adb()
+            .args(["-s", &self.serial, "shell", &cmd])
+            .output()
+            .await?;
+        let text = String::from_utf8_lossy(&out.stdout);
+        Ok(text
+            .lines()
+            .map(|l| l.trim_end())
+            .filter(|l| !l.is_empty())
+            .map(|l| (l.to_string(), 0u64))
+            .collect())
+    }
+
     async fn download(&self, remote: &str, local: &Path) -> Result<()> {
         if self.elevated.load(Ordering::Relaxed) {
             // `adb pull` runs as the shell user, so root-owned files need staging:

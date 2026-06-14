@@ -2,6 +2,8 @@ mod commands;
 mod config;
 mod session;
 mod transport;
+#[cfg(windows)]
+mod win_drag;
 
 use session::AppState;
 
@@ -23,6 +25,7 @@ pub fn run() {
             commands::list_dir,
             commands::read_chunk,
             commands::stage_for_drag,
+            commands::start_promised_drag,
             commands::drag_icon,
             commands::upload,
             commands::elevate,

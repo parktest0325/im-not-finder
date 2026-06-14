@@ -67,6 +67,10 @@ pub trait Transport: Send + Sync {
     async fn rename(&self, from: &str, to: &str) -> Result<()>;
     /// Copy `from` (file or dir) into the directory `to_dir`, keeping its name.
     async fn copy(&self, from: &str, to_dir: &str) -> Result<()>;
+    /// Recursively list every FILE under `root` as (absolute path, size). Size
+    /// may be 0 when unknown. Fast bulk enumeration (single round-trip where
+    /// possible) used by the drag descriptor.
+    async fn walk_files(&self, root: &str) -> Result<Vec<(String, u64)>>;
     /// Download a remote file (or directory tree) to a local path.
     async fn download(&self, remote: &str, local: &Path) -> Result<()>;
     /// Upload a local file (or directory) into a remote directory.

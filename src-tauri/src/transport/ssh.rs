@@ -280,6 +280,22 @@ impl Transport for SshTransport {
             .await
     }
 
+    async fn walk_files(&self, root: &str) -> Result<Vec<(String, u64)>> {
+        let inner = format!("find {} -type f", shq(root));
+        let (out, _e, _c) = if self.is_elevated() {
+            self.sudo_run(&inner, None).await?
+        } else {
+            self.raw_exec(&inner, None).await?
+        };
+        let text = String::from_utf8_lossy(&out);
+        Ok(text
+            .lines()
+            .map(|l| l.trim_end())
+            .filter(|l| !l.is_empty())
+            .map(|l| (l.to_string(), 0u64))
+            .collect())
+    }
+
     async fn download(&self, remote: &str, local: &Path) -> Result<()> {
         if self.is_elevated() {
             let (_, _e, code) = self

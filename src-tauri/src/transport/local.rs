@@ -155,6 +155,27 @@ impl Transport for LocalTransport {
         copy_tree(&src, &dest).await
     }
 
+    async fn walk_files(&self, root: &str) -> Result<Vec<(String, u64)>> {
+        let mut out = Vec::new();
+        let mut stack = vec![fs_path(root)];
+        while let Some(dir) = stack.pop() {
+            let mut rd = match tokio::fs::read_dir(&dir).await {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+            while let Some(ent) = rd.next_entry().await? {
+                let p = norm(&ent.path().to_string_lossy());
+                if ent.file_type().await?.is_dir() {
+                    stack.push(p);
+                } else {
+                    let size = ent.metadata().await.map(|m| m.len()).unwrap_or(0);
+                    out.push((p, size));
+                }
+            }
+        }
+        Ok(out)
+    }
+
     async fn download(&self, remote: &str, local: &Path) -> Result<()> {
         if let Some(parent) = local.parent() {
             tokio::fs::create_dir_all(parent).await.ok();

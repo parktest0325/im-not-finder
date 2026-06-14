@@ -160,6 +160,56 @@ pub async fn stage_for_drag(state: State<'_, AppState>, session_id: String, path
     Ok(local.to_string_lossy().to_string())
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DragInput {
+    path: String,
+    name: String,
+    is_dir: bool,
+    size: u64,
+}
+
+/// Windows delayed-rendering drag: hand the OS a promised-files data object so
+/// the bytes are only downloaded at drop time (folders enumerated recursively).
+#[tauri::command]
+pub async fn start_promised_drag(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    session_id: String,
+    items: Vec<DragInput>,
+) -> R<()> {
+    #[cfg(not(windows))]
+    {
+        let _ = (&app, &state, &session_id, &items);
+        Err("promised drag is only supported on Windows".into())
+    }
+    #[cfg(windows)]
+    {
+        let t = session(&state, &session_id).await?;
+        if items.is_empty() {
+            return Err("nothing to drag".into());
+        }
+        // pass the top-level items as-is; folders are enumerated lazily (only
+        // when the drop target asks for the descriptor) so the drag starts now.
+        let drag_items: Vec<crate::win_drag::Item> = items
+            .into_iter()
+            .map(|i| crate::win_drag::Item {
+                path: i.path,
+                name: i.name,
+                is_dir: i.is_dir,
+                size: i.size,
+            })
+            .collect();
+        let rt = tokio::runtime::Handle::current();
+        let transport = t.clone();
+        app.run_on_main_thread(move || {
+            crate::win_drag::do_drag(drag_items, transport, rt);
+        })
+        .map_err(e)?;
+        Ok(())
+    }
+}
+
 /// Materialise a small PNG on disk and return its path, for use as the native
 /// drag preview image (the drag plugin requires a real image file).
 #[tauri::command]
