@@ -10,15 +10,18 @@
     shellClose,
     type Session,
   } from "../lib/api";
+  import { installKittyKeyboard } from "../lib/kitty-keyboard";
 
   let {
     session,
     active,
     zoom = 1,
+    initialCwd = null,
   }: {
     session: Session;
     active: boolean;
     zoom?: number;
+    initialCwd?: string | null; // restore: cd here once the shell is up
   } = $props();
 
   const BASE_FONT = 13;
@@ -28,6 +31,9 @@
   let shellId: string | null = null;
   let unlisten: UnlistenFn | undefined;
   let started = false;
+  // last directory the shell reported (via the per-prompt OSC hook); used by the
+  // "⇄ files" sync button and persisted so a reconnect can restore it.
+  let cwd: string | null = null;
 
   const theme = {
     background: "#0b0e14",
@@ -41,7 +47,7 @@
       term = new XTerm({
         fontFamily:
           '"Cascadia Mono","JetBrains Mono","Consolas",ui-monospace,monospace',
-        fontSize: BASE_FONT,
+        fontSize: Math.max(6, Math.round(BASE_FONT * zoom)),
         theme,
         cursorBlink: true,
         scrollback: 5000,
@@ -50,6 +56,19 @@
       term.loadAddon(fit);
       term.open(host);
       safeFit();
+      // Negotiate the kitty keyboard protocol so apps that ask for it (Claude
+      // Code, etc.) get proper modifier-encoded keys — e.g. Shift+Enter as a
+      // real CSI-u sequence instead of a plain CR. No-op until an app enables it.
+      installKittyKeyboard(term, (data) => {
+        if (shellId) void shellWrite(shellId, data);
+      });
+      // The shell emits this private OSC on every prompt (see installCwdHook),
+      // carrying $PWD. The parser consumes it invisibly, so we always know the
+      // live directory without any on-screen noise.
+      term.parser.registerOscHandler(7771, (data) => {
+        if (data) cwd = data;
+        return true;
+      });
       term.onData((d) => {
         if (shellId) void shellWrite(shellId, d);
       });
@@ -73,12 +92,18 @@
     }
   });
 
-  // The terminal scales with the app via the document's CSS zoom. Browser zoom
-  // doesn't fire ResizeObserver (layout size is unchanged), so refit explicitly
-  // whenever the zoom changes.
+  // App zoom: CSS `zoom` on an xterm ancestor corrupts mouse/selection coords,
+  // so we counter-zoom the host to a NET scale of 1 (and grow the font instead).
+  // The host is sized 100%*Z then zoomed 1/Z, so it still fills the panel.
   $effect(() => {
-    void zoom;
+    const z = zoom || 1;
+    if (host) {
+      host.style.zoom = String(1 / z);
+      host.style.width = `calc(100% * ${z})`;
+      host.style.height = `calc(100% * ${z})`;
+    }
     if (term) {
+      term.options.fontSize = Math.max(6, Math.round(BASE_FONT * z));
       requestAnimationFrame(() => {
         safeFit();
         if (shellId && term) void shellResize(shellId, term.cols, term.rows);
@@ -114,11 +139,10 @@
         fit?.fit();
         return;
       }
-      // host padding (4px x / 2px y) is in layout px, but rect/cell are zoomed,
-      // so scale it; a touch extra guarantees the grid never overflows the host.
-      const z = zoom || 1;
-      const cols = Math.max(2, Math.floor((rect.width - 10 * z) / cellW));
-      const rows = Math.max(1, Math.floor((rect.height - 6 * z) / cellH));
+      // host is counter-zoomed to net scale 1, so px are screen px: subtract the
+      // fixed host padding (4px x / 2px y) plus a touch to avoid overflow.
+      const cols = Math.max(2, Math.floor((rect.width - 10) / cellW));
+      const rows = Math.max(1, Math.floor((rect.height - 6) / cellH));
       if (cols !== term.cols || rows !== term.rows) term.resize(cols, rows);
     } catch {
       try {
@@ -129,16 +153,44 @@
     }
   }
 
+  const isPowerShell = () =>
+    session.kind === "local" && /pwsh|powershell/i.test(session.label);
+
+  // One-time setup so the shell reports $PWD via OSC 7771 on every prompt.
+  // PowerShell: redefine `prompt`; bash/zsh: PROMPT_COMMAND + precmd; ADB's mksh
+  // (no PROMPT_COMMAND) embeds a command substitution in PS1, which mksh
+  // re-evaluates each prompt.
+  function cwdHookCmd(): string | null {
+    if (isPowerShell())
+      return `function prompt { [Console]::Out.Write([char]27 + ']7771;' + ($PWD.Path -replace '\\\\','/') + [char]7); 'PS ' + $PWD.Path + '> ' }`;
+    if (session.kind === "adb")
+      return `PS1='$(printf "\\033]7771;%s\\007" "$PWD")'"$PS1"`;
+    return `PROMPT_COMMAND='printf "\\033]7771;%s\\007" "$PWD"'; precmd(){ printf '\\033]7771;%s\\007' "$PWD"; }`;
+  }
+
   async function start() {
     if (started || !term) return;
     started = true;
     safeFit();
     term.write(`\x1b[2m── ${session.label} ──\x1b[0m\r\n`);
     try {
-      shellId = await shellOpen(session.id, term.cols || 80, term.rows || 24);
-      unlisten = await listen<number[]>(`term://${shellId}`, (ev) => {
+      // subscribe BEFORE spawning so the first prompt isn't lost (matters when
+      // several terminals open at once, e.g. restoring an ADB session)
+      const id = `${session.id}::${crypto.randomUUID()}`;
+      unlisten = await listen<number[]>(`term://${id}`, (ev) => {
         term?.write(Uint8Array.from(ev.payload));
       });
+      shellId = await shellOpen(session.id, id, term.cols || 80, term.rows || 24);
+      // teach the shell to report its cwd, then restore the saved directory
+      const hook = cwdHookCmd();
+      if (hook) void shellWrite(shellId, hook + "\r");
+      if (initialCwd) {
+        const q = isPowerShell()
+          ? initialCwd.replace(/'/g, "''")
+          : initialCwd.replace(/'/g, "'\\''");
+        cwd = initialCwd;
+        void shellWrite(shellId, `cd '${q}'\r`);
+      }
     } catch (e) {
       term.write(`\r\n\x1b[31mshell error: ${e}\x1b[0m\r\n`);
     }
@@ -173,6 +225,11 @@
     if (shellId) void shellWrite(shellId, text);
   }
 
+  // The directory the shell last reported (live, from the OSC 7771 hook).
+  export function getCwd(): string | null {
+    return cwd;
+  }
+
   export async function dispose() {
     unlisten?.();
     if (shellId) {
@@ -198,8 +255,12 @@
 
 <style>
   .term-host {
+    /* width/height/zoom are set in JS to counter-zoom to a net scale of 1 */
     position: absolute;
-    inset: 0;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
     padding: 2px 4px;
     background: var(--bg);
     overflow: hidden;

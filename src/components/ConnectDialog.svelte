@@ -6,6 +6,8 @@
     connectLocal,
     listSshHistory,
     deleteSshHistory,
+    ensureAppSshKey,
+    registerSshKey,
     type Session,
     type AdbDevice,
     type SshConnectOpts,
@@ -120,6 +122,33 @@
   let keyPath = $state("");
   let keyPassphrase = $state("");
 
+  // im-not-finder's dedicated key (created on first use); the default key path
+  let defaultKey = $state("");
+  (async () => {
+    try {
+      const k = await ensureAppSshKey();
+      if (k) {
+        defaultKey = k;
+        if (!keyPath) {
+          keyPath = k;
+          authMode = "key";
+        }
+      }
+    } catch {
+      /* ignore */
+    }
+  })();
+
+  // fill the default key whenever key-auth is chosen and no path is set yet
+  // (a saved/history connection keeps its own path; only empty → default)
+  function useDefaultKeyIfEmpty() {
+    if (!keyPath && defaultKey) keyPath = defaultKey;
+  }
+
+  // ssh-copy-id fallback: when key auth fails, install the key with a password
+  let registerOpen = $state(false);
+  let regPassword = $state("");
+
   async function connectSshNow() {
     error = "";
     busy = true;
@@ -133,6 +162,24 @@
       onConnected(await connectSsh(opts));
     } catch (e) {
       error = String(e);
+      busy = false;
+      // offer to register the key on the server (one-time, via password)
+      if (authMode === "key" && keyPath) registerOpen = true;
+    }
+  }
+
+  async function registerNow() {
+    error = "";
+    busy = true;
+    try {
+      await registerSshKey(host, port, username, regPassword, keyPath);
+      registerOpen = false;
+      regPassword = "";
+      const opts: SshConnectOpts = { host, port, username, keyPath };
+      if (keyPassphrase) opts.keyPassphrase = keyPassphrase;
+      onConnected(await connectSsh(opts));
+    } catch (e) {
+      error = `register failed: ${e}`;
       busy = false;
     }
   }
@@ -239,7 +286,12 @@
             password</label
           >
           <label class="radio"
-            ><input type="radio" bind:group={authMode} value="key" /> key file</label
+            ><input
+              type="radio"
+              bind:group={authMode}
+              value="key"
+              onchange={useDefaultKeyIfEmpty}
+            /> key file</label
           >
         </div>
 
@@ -267,6 +319,34 @@
             >connect</button
           >
         </div>
+
+        {#if registerOpen}
+          <div class="register full">
+            <p class="dim">
+              key auth failed — install this key on the server (one-time, needs
+              the account password):
+            </p>
+            <input
+              type="password"
+              bind:value={regPassword}
+              placeholder="server password"
+              onkeydown={(e) => e.key === "Enter" && regPassword && registerNow()}
+            />
+            <div class="actions">
+              <button
+                onclick={() => {
+                  registerOpen = false;
+                  regPassword = "";
+                }}>cancel</button
+              >
+              <button
+                class="primary"
+                onclick={registerNow}
+                disabled={busy || !regPassword}>register &amp; connect</button
+              >
+            </div>
+          </div>
+        {/if}
       </div>
     {:else}
       <div class="local">
@@ -475,6 +555,21 @@
     color: var(--bg);
     border-color: var(--accent);
     font-weight: 600;
+  }
+  .register {
+    border: 1px solid var(--accent);
+    background: rgba(122, 162, 247, 0.06);
+    padding: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .register p {
+    margin: 0;
+    line-height: 1.5;
+  }
+  .register .actions {
+    gap: 8px;
   }
   .local p {
     margin: 0 0 14px;

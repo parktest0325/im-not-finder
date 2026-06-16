@@ -58,3 +58,27 @@ pub fn delete(app: &AppHandle, id: &str) {
     list.retain(|e| e.id != id);
     let _ = save_all(app, &list);
 }
+
+// ---- workspace blob (opaque JSON owned by the frontend) ----
+// Holds the per-session terminal layout (tab names + last cwd) so a reconnect
+// can restore where each terminal/FILES was. Still no secrets: only paths and
+// labels keyed by the session identity, never credentials.
+
+fn workspace_path(app: &AppHandle) -> anyhow::Result<PathBuf> {
+    let dir = app.path().app_config_dir()?;
+    std::fs::create_dir_all(&dir).ok();
+    Ok(dir.join("workspace.json"))
+}
+
+pub fn load_workspace(app: &AppHandle) -> String {
+    let Ok(path) = workspace_path(app) else {
+        return "{}".to_string();
+    };
+    std::fs::read_to_string(&path).unwrap_or_else(|_| "{}".to_string())
+}
+
+pub fn save_workspace(app: &AppHandle, data: &str) {
+    if let Ok(path) = workspace_path(app) {
+        let _ = std::fs::write(path, data);
+    }
+}

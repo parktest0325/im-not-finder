@@ -24,11 +24,19 @@
     onOpen,
     onStatus,
     onSyncTerminal,
+    restoreCwd = null,
+    savedElevated = false,
+    onCwd,
+    onElevated,
   }: {
     session: Session | null;
     onOpen: (session: Session, path: string, name: string) => void;
     onStatus: (s: string) => void;
     onSyncTerminal: (path: string) => void;
+    restoreCwd?: string | null; // saved FILES dir for this session (restore)
+    savedElevated?: boolean; // saved su/root state to re-apply on connect
+    onCwd?: (path: string) => void; // report current dir (for persistence)
+    onElevated?: (on: boolean) => void; // report su state (for persistence)
   } = $props();
 
   let cwd = $state("/");
@@ -78,6 +86,7 @@
     if (elevated) {
       await unelevate(sid);
       elevatedBy = { ...elevatedBy, [sid]: false };
+      onElevated?.(false);
       onStatus("elevation off");
       void load();
       return;
@@ -86,6 +95,7 @@
       const st = await elevate(sid);
       if (st.elevated) {
         elevatedBy = { ...elevatedBy, [sid]: true };
+        onElevated?.(true);
         onStatus(`elevated — ${st.message}`);
         void load();
       } else if (st.needsPassword) {
@@ -104,6 +114,7 @@
       const st = await elevate(sid, pwValue);
       if (st.elevated) {
         elevatedBy = { ...elevatedBy, [sid]: true };
+        onElevated?.(true);
         pwPrompt = false;
         pwValue = "";
         onStatus("elevated — sudo");
@@ -126,16 +137,38 @@
   $effect(() => {
     if (session && session.id !== lastSession) {
       lastSession = session.id;
-      cwd = session.home || "/";
-      void load();
+      // restore the saved dir for this session, else start at home
+      cwd = restoreCwd || session.home || "/";
+      void initSession();
     } else if (!session) {
       lastSession = null;
       entries = [];
     }
   });
 
-  async function load() {
-    if (!session) return;
+  // On (re)connect: re-apply saved su state first (rooted dirs need it to list),
+  // then load the restored cwd — falling back to home if that dir is gone.
+  async function initSession() {
+    if (savedElevated && session && !elevated) {
+      try {
+        const st = await elevate(session.id);
+        if (st.elevated) {
+          elevatedBy = { ...elevatedBy, [session.id]: true };
+          onElevated?.(true);
+        }
+      } catch {
+        /* best effort — password sudo can't auto-restore */
+      }
+    }
+    const ok = await load();
+    if (!ok && session && cwd !== (session.home || "/")) {
+      cwd = session.home || "/";
+      await load();
+    }
+  }
+
+  async function load(): Promise<boolean> {
+    if (!session) return false;
     loading = true;
     error = "";
     closeMenu();
@@ -152,10 +185,13 @@
       const present = new Set(list.map((e) => e.path));
       selected = new Set([...selected].filter((p) => present.has(p)));
       onStatus(`${cwd} — ${list.length} items`);
+      onCwd?.(cwd);
+      return true;
     } catch (e) {
       error = String(e);
       entries = [];
       onStatus(`error: ${e}`);
+      return false;
     } finally {
       loading = false;
     }
@@ -169,6 +205,11 @@
   }
   const up = () => navigate(parentPath(cwd));
   const goHome = () => session && navigate(session.home || "/");
+
+  // jump the tree to a path reported by the terminal (cwd sync)
+  export function navigateTo(path: string) {
+    if (session && path) navigate(path);
+  }
 
   // click the path to copy it (with a brief visual confirmation)
   let copied = $state(false);

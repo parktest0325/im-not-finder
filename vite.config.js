@@ -10,13 +10,13 @@ export default defineConfig(async () => ({
   // Vite options tailored for Tauri development, applied during `tauri dev`/`tauri build`.
   clearScreen: false,
   server: {
-    // 1420 (Tauri default) sits inside common Windows reserved port ranges
-    // (Hyper-V/WSL), causing EACCES; 1500 is outside them.
-    port: 1500,
+    // Windows reserves shifting port bands (Hyper-V/WSL) around 1030-1629, which
+    // swallow 1420/1500 with EACCES; 3000 sits outside them.
+    port: 3000,
     strictPort: true,
     host: host || false,
     hmr: host
-      ? { protocol: "ws", host, port: 1501 }
+      ? { protocol: "ws", host, port: 3001 }
       : undefined,
     watch: {
       // Don't watch the Rust side; Tauri handles that.

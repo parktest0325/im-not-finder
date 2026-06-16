@@ -21,14 +21,16 @@ pub struct SessionInfo {
     kind: String,
     label: String,
     home: String,
+    key: String, // stable identity across restarts (for workspace restore)
 }
 
-fn info(id: String, kind: &str, t: &Arc<dyn Transport>) -> SessionInfo {
+fn info(id: String, kind: &str, key: String, t: &Arc<dyn Transport>) -> SessionInfo {
     SessionInfo {
         id,
         kind: kind.to_string(),
         label: t.label(),
         home: t.home(),
+        key,
     }
 }
 
@@ -45,7 +47,7 @@ pub async fn connect_adb(state: State<'_, AppState>, serial: String) -> R<Sessio
     let t: Arc<dyn Transport> = Arc::new(t);
     let id = state.next_id("adb");
     state.add_session(id.clone(), t.clone()).await;
-    Ok(info(id, "adb", &t))
+    Ok(info(id, "adb", format!("adb:{serial}"), &t))
 }
 
 #[derive(Deserialize)]
@@ -70,6 +72,7 @@ pub async fn connect_ssh(
     } else {
         "key"
     };
+    let key = format!("ssh:{}@{}:{}", opts.username, opts.host, opts.port);
     let hist = crate::config::SshHistoryEntry {
         id: format!("{}@{}:{}", opts.username, opts.host, opts.port),
         host: opts.host.clone(),
@@ -93,7 +96,7 @@ pub async fn connect_ssh(
     let t: Arc<dyn Transport> = Arc::new(t);
     let id = state.next_id("ssh");
     state.add_session(id.clone(), t.clone()).await;
-    Ok(info(id, "ssh", &t))
+    Ok(info(id, "ssh", key, &t))
 }
 
 #[tauri::command]
@@ -101,9 +104,100 @@ pub fn list_ssh_history(app: AppHandle) -> R<Vec<crate::config::SshHistoryEntry>
     Ok(crate::config::load(&app))
 }
 
+fn ssh_dir() -> Option<std::path::PathBuf> {
+    let home = std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .ok()?;
+    Some(std::path::Path::new(&home).join(".ssh"))
+}
+
+/// Path to im-not-finder's dedicated SSH key, generating an ed25519 keypair
+/// (via ssh-keygen) the first time. Used as the connect dialog's default key.
+#[tauri::command]
+pub fn ensure_app_ssh_key() -> R<String> {
+    let dir = ssh_dir().ok_or_else(|| "no home directory".to_string())?;
+    std::fs::create_dir_all(&dir).map_err(e)?;
+    let key = dir.join("im-not-finder");
+    if !key.is_file() {
+        let mut c = std::process::Command::new("ssh-keygen");
+        c.args(["-t", "ed25519", "-N", "", "-C", "im-not-finder", "-f"])
+            .arg(&key);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            c.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        }
+        let out = c
+            .output()
+            .map_err(|err| format!("ssh-keygen unavailable: {err}"))?;
+        if !out.status.success() {
+            return Err(format!(
+                "ssh-keygen failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            ));
+        }
+    }
+    Ok(key.to_string_lossy().to_string())
+}
+
+/// Install a public key (`<key_path>.pub`) into the server's authorized_keys by
+/// connecting once with a password — the ssh-copy-id flow. After this, key auth
+/// for that host works.
+#[tauri::command]
+pub async fn register_ssh_key(
+    host: String,
+    port: u16,
+    username: String,
+    password: String,
+    key_path: String,
+) -> R<()> {
+    let pub_path = format!("{key_path}.pub");
+    let pubkey = std::fs::read_to_string(&pub_path)
+        .map_err(|err| format!("can't read {pub_path}: {err}"))?
+        .trim()
+        .to_string();
+    if pubkey.is_empty() {
+        return Err("public key file is empty".into());
+    }
+    let t = SshTransport::connect(SshConnectOpts {
+        host,
+        port,
+        username,
+        password: Some(password),
+        key_path: None,
+        key_passphrase: None,
+    })
+    .await
+    .map_err(e)?;
+    let cmd = format!(
+        "mkdir -p ~/.ssh && chmod 700 ~/.ssh && touch ~/.ssh/authorized_keys && \
+         chmod 600 ~/.ssh/authorized_keys && \
+         grep -qxF \"{pubkey}\" ~/.ssh/authorized_keys || \
+         printf '%s\\n' \"{pubkey}\" >> ~/.ssh/authorized_keys"
+    );
+    let res = t.exec(&cmd).await.map_err(e)?;
+    if res.code != 0 {
+        return Err(format!("install failed: {}", res.stderr));
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub fn delete_ssh_history(app: AppHandle, id: String) -> R<()> {
     crate::config::delete(&app, &id);
+    Ok(())
+}
+
+// ---------------- workspace (open sessions + terminal layout) ----------------
+
+#[tauri::command]
+pub fn load_workspace(app: AppHandle) -> R<String> {
+    Ok(crate::config::load_workspace(&app))
+}
+
+#[tauri::command]
+pub fn save_workspace(app: AppHandle, data: String) -> R<()> {
+    crate::config::save_workspace(&app, &data);
     Ok(())
 }
 
@@ -113,7 +207,7 @@ pub async fn connect_local(state: State<'_, AppState>) -> R<SessionInfo> {
     let t: Arc<dyn Transport> = Arc::new(t);
     let id = state.next_id("local");
     state.add_session(id.clone(), t.clone()).await;
-    Ok(info(id, "local", &t))
+    Ok(info(id, "local", "local".to_string(), &t))
 }
 
 #[tauri::command]
@@ -302,11 +396,13 @@ pub async fn shell_open(
     app: AppHandle,
     state: State<'_, AppState>,
     session_id: String,
+    shell_id: String,
     cols: u16,
     rows: u16,
 ) -> R<String> {
     let t = session(&state, &session_id).await?;
-    let shell_id = format!("{session_id}::{}", state.next_id("sh"));
+    // The frontend subscribes to term://<shell_id> before invoking us, so the
+    // shell's first output isn't lost to a listener-registration race.
     let handle = t
         .open_shell(app, shell_id.clone(), cols, rows)
         .await

@@ -8,6 +8,8 @@ export interface Session {
   kind: SessionKind;
   label: string; // e.g. "user@host" or "Pixel 7 (adb)"
   home: string; // initial directory to open
+  key: string; // connection identity (for reconnect): adb serial / ssh id / local
+  wsKey?: string; // per-instance storage slot (key, or key#2… on collision)
 }
 
 export type EntryKind = "file" | "dir" | "symlink" | "other";
@@ -80,6 +82,71 @@ export const listSshHistory = () =>
   invoke<SshHistoryEntry[]>("list_ssh_history");
 export const deleteSshHistory = (id: string) =>
   invoke<void>("delete_ssh_history", { id });
+/** im-not-finder's dedicated SSH key path (generated on first use). */
+export const ensureAppSshKey = () => invoke<string>("ensure_app_ssh_key");
+/** Install <keyPath>.pub into the server's authorized_keys via password (ssh-copy-id). */
+export const registerSshKey = (
+  host: string,
+  port: number,
+  username: string,
+  password: string,
+  keyPath: string,
+) =>
+  invoke<void>("register_ssh_key", { host, port, username, password, keyPath });
+
+// ---- workspace (open sessions + per-session layout, restored on relaunch) ----
+export interface WsTerminal {
+  name: string;
+  cwd: string | null;
+}
+export interface WsEntry {
+  kind: SessionKind;
+  identity: string; // connection identity (reuse-match + reconnect): serial / ssh id / local
+  terminals: WsTerminal[];
+  filesCwd: string | null;
+  elevated: boolean; // su / root state to re-apply on reconnect
+  name?: string; // custom session-tab label
+}
+export interface Workspace {
+  active: string | null; // last active wsKey
+  openKeys: string[]; // wsKeys open at last persist → auto-reconnect on launch
+  entries: Record<string, WsEntry>; // per-instance layout, keyed by unique wsKey
+}
+
+export const emptyWorkspace = (): Workspace => ({
+  active: null,
+  openKeys: [],
+  entries: {},
+});
+
+function normalizeWs(raw: unknown): Workspace {
+  const w = emptyWorkspace();
+  if (raw && typeof raw === "object" && "openKeys" in raw) {
+    const o = raw as Record<string, unknown>;
+    w.active = (o.active as string) ?? null;
+    w.entries = (o.entries as Workspace["entries"]) ?? {};
+    // dedupe + keep only keys that actually have a saved entry
+    const seen = new Set<string>();
+    for (const k of Array.isArray(o.openKeys) ? o.openKeys : []) {
+      if (typeof k === "string" && !seen.has(k) && w.entries[k]) {
+        seen.add(k);
+        w.openKeys.push(k);
+      }
+    }
+  }
+  // older/incompatible blobs are discarded (start fresh) rather than migrated
+  return w;
+}
+
+export const loadWorkspace = async (): Promise<Workspace> => {
+  try {
+    return normalizeWs(JSON.parse(await invoke<string>("load_workspace")));
+  } catch {
+    return emptyWorkspace();
+  }
+};
+export const saveWorkspace = (ws: Workspace) =>
+  invoke<void>("save_workspace", { data: JSON.stringify(ws) });
 
 // ---- filesystem ----
 export const listDir = (sessionId: string, path: string) =>
@@ -146,8 +213,14 @@ export const exec = (sessionId: string, command: string) =>
   invoke<ExecResult>("exec_command", { sessionId, command });
 
 // ---- interactive shell (terminal) ----
-export const shellOpen = (sessionId: string, cols: number, rows: number) =>
-  invoke<string>("shell_open", { sessionId, cols, rows });
+// The caller pre-generates shellId and subscribes to term://<shellId> BEFORE
+// calling this, so no early shell output (the first prompt) is ever lost.
+export const shellOpen = (
+  sessionId: string,
+  shellId: string,
+  cols: number,
+  rows: number,
+) => invoke<string>("shell_open", { sessionId, shellId, cols, rows });
 export const shellWrite = (shellId: string, data: string) =>
   invoke<void>("shell_write", { shellId, data });
 export const shellResize = (shellId: string, cols: number, rows: number) =>
